@@ -1,3 +1,5 @@
+import pytorch_lightning.loggers
+from torchmetrics.classification import MulticlassAccuracy
 from create_model import ChessModel
 import torch
 import lightning
@@ -6,9 +8,9 @@ import logging
 
 
 logger = logging.getLogger(__name__)
-max_epochs = 1
+max_epochs = 30
 batch_size = 128
-base_path = ''
+base_path = 'drive/MyDrive/'
 train_perc = 0.8
 val_perc = 0.1
 
@@ -17,6 +19,8 @@ class ChessLightning(lightning.LightningModule):
     def __init__(self, model):
         super().__init__()
         self.model = model
+        self.val_top5 = MulticlassAccuracy(num_classes=1968, top_k=5, average='micro')
+        self.test_top5 = MulticlassAccuracy(num_classes=1968, top_k=5, average='micro')
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-4)
@@ -25,32 +29,28 @@ class ChessLightning(lightning.LightningModule):
                       'lr_schedule': {'scheduler': lr_scheduler, 'step': 'epoch', 'frequency': 1}}
         return optim_dict
 
-    def calculate_loss(self, batch, get_acc=False):
+    def training_step(self, batch, batch_idx):
         x_batch, t_batch, y_batch, m_batch = batch
         masked_logits = self.model(x_batch, t_batch).masked_fill(m_batch == 0, float('-inf'))
         loss = torch.nn.functional.cross_entropy(masked_logits, y_batch)
-
-        if get_acc:
-            _, predicted = torch.max(masked_logits.data, 1)
-            acc = (predicted == y_batch).sum() / y_batch.shape[0]
-        else:
-            acc = None
-        return loss, acc
-
-    def training_step(self, batch, batch_idx):
-        loss, _ = self.calculate_loss(batch)
         self.log('train_loss', loss)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        loss, acc = self.calculate_loss(batch, get_acc=True)
+        x_batch, t_batch, y_batch, m_batch = batch
+        masked_logits = self.model(x_batch, t_batch).masked_fill(m_batch == 0, float('-inf'))
+        loss = torch.nn.functional.cross_entropy(masked_logits, y_batch)
+        self.val_top5(masked_logits, y_batch)
         self.log('val_loss', loss)
-        self.log('val_acc', acc)
+        self.log('val_acc', self.val_top5)
 
     def test_step(self, batch, batch_idx):
-        loss, acc = self.calculate_loss(batch, get_acc=True)
+        x_batch, t_batch, y_batch, m_batch = batch
+        masked_logits = self.model(x_batch, t_batch).masked_fill(m_batch == 0, float('-inf'))
+        loss = torch.nn.functional.cross_entropy(masked_logits, y_batch)
+        self.test_top5(masked_logits, y_batch)
         self.log('test_loss', loss)
-        self.log('test_acc', acc)
+        self.log('test_acc', self.test_top5)
 
 
 class ChessDataset(torch.utils.data.Dataset):
@@ -61,7 +61,7 @@ class ChessDataset(torch.utils.data.Dataset):
         self.packed_mask = numpy.load(mask_path, mmap_mode='r')
 
     def __len__(self):
-        return len(self.t)
+        return self.t.shape[0]
 
     def __getitem__(self, item):
         x_tensor = torch.tensor(self.x[item], dtype=torch.long)
@@ -85,11 +85,21 @@ if __name__ == '__main__':
     logger.info('Opening transformed_data.csv')
     dataset = ChessDataset(base_path + 'x.npy', base_path + 't.npy', base_path + 'y.npy', base_path + 'mask.npy')
 
+    # split by game_id so that games don't appear in multiple data splits
+    g = numpy.load(base_path + 'g.npy')
     indices = numpy.arange(len(dataset))
-    n = round(train_perc * indices.shape[0])
-    m = n + round(val_perc * indices.shape[0])
-    rng = numpy.random.default_rng()
-    rng.shuffle(indices)
+    n = m = -1
+    count = 0
+    for i in range(1, indices.shape[0]):
+        count += 1
+        if g[i] == g[i - 1]:
+            continue
+        elif n == -1 and (count / indices.shape[0]) >= train_perc:
+            n = i
+        elif m == -1 and (count / indices.shape[0]) >= train_perc + val_perc:
+            m = i
+            break
+    del g
 
     train_dataset = torch.utils.data.Subset(dataset, indices[:n])
     val_dataset = torch.utils.data.Subset(dataset, indices[n:m])
@@ -103,7 +113,8 @@ if __name__ == '__main__':
                                                                       filename="{epoch}-{val_loss:.3f}",
                                                                       dirpath=base_path)
 
-    trainer = lightning.Trainer(max_epochs=max_epochs, callbacks=[checkpoint_callback])
+    logger_lightning = pytorch_lightning.loggers.CSVLogger(save_dir=base_path)
+    trainer = lightning.Trainer(max_epochs=max_epochs, callbacks=[checkpoint_callback], logger=logger_lightning)
 
     logger.info('Beginning the training loop...')
     trainer.fit(chess_lightning, train_loader, val_loader)

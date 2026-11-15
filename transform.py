@@ -164,6 +164,7 @@ if __name__ == '__main__':
     # next_move: an integer in range(0, 1968) for the move played in current position
     mask = []
     # mask: 1x1968 boolean array for recording what moves where legal in position
+    game_id = []
 
     game_count = 0
     data_entries = 0
@@ -177,6 +178,7 @@ if __name__ == '__main__':
         turn.extend(game_data[1])
         next_move.extend(game_data[2])
         mask.extend(game_data[3])
+        game_id.extend([game_count] * len(game_data[1]))
 
         game_count += 1
         data_entries += len(game_data[0])
@@ -196,5 +198,7 @@ if __name__ == '__main__':
     del turn
     numpy.save('y.npy', numpy.array(next_move, dtype=numpy.int64))
     del next_move
+    numpy.save('g.npy', numpy.array(game_id, dtype=numpy.int64))
+    del game_id
 
     logger.info(f'Finished data transformation. Saved {game_count} games with {data_entries} data points.')
